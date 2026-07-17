@@ -1,18 +1,54 @@
-name: Docker Image CI
+name: CI/CD - Build, Push to Artifact Registry & Deploy
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    branches: [main]
+
+env:
+  ARTIFACT_LOCATION: europe-west1
+  ARTIFACT_REPO_ID: quelpoke     
+  GCP_PROJECT_ID: cs-poc-hpzdycpiqjyvinhrczvlwcn
+  IMAGE_NAME: quelpoke
 
 jobs:
-
-  build:
-
+  build-push-deploy:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag my-image-name:$(date +%s)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.ARTIFACT_LOCATION }}-docker.pkg.dev --quiet
+
+      - name: Build image
+        run: |
+          docker build -t ${{ env.ARTIFACT_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO_ID }}/${{ env.IMAGE_NAME }}:${{ github.sha }} .
+
+      - name: Push image
+        run: |
+          docker push ${{ env.ARTIFACT_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO_ID }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Deploy on VM via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.GCP_VM_IP }}
+          username: ${{ secrets.GCP_VM_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            gcloud auth configure-docker ${{ env.ARTIFACT_LOCATION }}-docker.pkg.dev --quiet
+            docker pull ${{ env.ARTIFACT_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO_ID }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            docker stop quelpoke || true
+            docker rm quelpoke || true
+            docker run -d \
+              --name quelpoke \
+              --restart unless-stopped \
+              -p 8080:8080 \
+              ${{ env.ARTIFACT_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO_ID }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
